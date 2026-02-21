@@ -313,7 +313,7 @@ def train_models_from_csv():
  AIRLINE_ENC_MAP, SAFETY_ENC_MAP, MODEL_R2, MODEL_RMSE, models_loaded) = train_models_from_csv()
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
-COST_PER_MIN = 5400  # ₹5,400 per minute delay (~$65, as per problem statement)
+COST_PER_MIN = 5400  # ₹5,400 per minute (~$65, per problem statement)
 COST_PER_MIN_USD = 65
 
 def predict_tat(bags, priority_bags, meals, special_meals, fuel,
@@ -377,45 +377,27 @@ def predict_tat(bags, priority_bags, meals, special_meals, fuel,
 
 
 # ─── DATA-DRIVEN THRESHOLD CALIBRATION ────────────────────────────────────
-# Thresholds derived directly from actual dataset (500 flights):
-#   TAT range: 20–45 min, mean: 32.8 min, median: 32 min
-#   33rd percentile = 29 min → ON TIME cutoff
-#   67th percentile = 37 min → AT RISK cutoff
-# This gives a natural ~1/3 split: 36% ON TIME, 31% AT RISK, 32% DELAYED
-# These are NOT assumptions — they come from the actual Finish_Time − Arrival_Time
-# in fuel_operations.csv across all 500 flights.
-
+# Thresholds from actual dataset percentiles (500 flights):
+#   TAT: 20–45 min, mean=32.8m | 33rd %ile=29m | 67th %ile=37m
 @st.cache_data(ttl=0)
 def calibrate_thresholds():
-    """Calculate thresholds from actual dataset percentiles."""
     try:
         import os
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
         df_fuel = pd.read_csv(os.path.join(BASE_DIR, "fuel_operations.csv"))
-
-        def parse_time(val):
+        def _pt(val):
             val = str(val).strip()
-            for fmt in ('%H:%M:%S','%I:%M %p','%I:%M:%S %p','%H:%M'):
-                try: return pd.to_datetime(val, format=fmt)
+            for f in ('%H:%M:%S','%I:%M %p','%I:%M:%S %p','%H:%M'):
+                try: return pd.to_datetime(val, format=f)
                 except: continue
             return pd.NaT
-
-        df_fuel['arr_dt'] = df_fuel['Arrival_Time'].apply(parse_time)
-        df_fuel['fin_dt'] = df_fuel['Finish_Time'].apply(parse_time)
-        diff = (df_fuel['fin_dt'] - df_fuel['arr_dt']).dt.total_seconds()
-        diff = diff.where(diff >= 0, diff + 86400)
-        tat_min = diff / 60
-
-        on_time_thresh = tat_min.quantile(0.33)   # 29 min
-        at_risk_thresh = tat_min.quantile(0.67)    # 37 min
-        cal_min = tat_min.min()                     # 20 min
-        cal_max = tat_min.max()                     # 45 min
-        avg_tat = tat_min.mean()                    # 32.8 min
-
-        return on_time_thresh, at_risk_thresh, cal_min, cal_max, avg_tat
-
-    except Exception:
-        # Fallback: hardcoded from known dataset analysis
+        df_fuel['arr_dt'] = df_fuel['Arrival_Time'].apply(_pt)
+        df_fuel['fin_dt'] = df_fuel['Finish_Time'].apply(_pt)
+        d = (df_fuel['fin_dt'] - df_fuel['arr_dt']).dt.total_seconds()
+        d = d.where(d >= 0, d + 86400)
+        tat = d / 60
+        return tat.quantile(0.33), tat.quantile(0.67), tat.min(), tat.max(), tat.mean()
+    except:
         return 29.0, 37.0, 20.0, 45.0, 32.8
 
 ON_TIME_THRESH, AT_RISK_THRESH, CAL_MIN, CAL_MAX, DATASET_AVG_TAT = calibrate_thresholds()
@@ -495,7 +477,8 @@ with st.sidebar:
         "📊  Historical Insights",
         "🤖  AI Ops Assistant",
         "⚙️  Crew Optimizer",
-        "🔗  Delay Propagation"
+        "🔗  Delay Propagation",
+        "🚨  Day 2: Crisis Mode"
     ], label_visibility="collapsed")
 
     st.markdown("---")
@@ -512,11 +495,11 @@ with st.sidebar:
             🟡 ≤ {AT_RISK_THRESH:.0f} min (P67)<br>
             🔴 > {AT_RISK_THRESH:.0f} min
         </div>
-        <div style='font-size:0.68rem;color:#475569;margin-top:4px;'>From dataset percentiles · Avg TAT: {DATASET_AVG_TAT:.1f}m · Range: {CAL_MIN:.0f}–{CAL_MAX:.0f}m</div>
+        <div style='font-size:0.68rem;color:#475569;margin-top:4px;'>From dataset · Avg: {DATASET_AVG_TAT:.1f}m · Range: {CAL_MIN:.0f}–{CAL_MAX:.0f}m</div>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown(f"<div style='font-size:0.78rem;color:#64748b;margin-top:8px;'>Cost per delay minute<br><span style='color:#f0f4ff;font-family:Space Mono;'>${COST_PER_MIN_USD} ≈ {fmt_inr(COST_PER_MIN)}</span></div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='font-size:0.78rem;color:#64748b;margin-top:8px;'>Cost/min: <span style='color:#f0f4ff;font-family:Space Mono;'>${COST_PER_MIN_USD} ≈ {fmt_inr(COST_PER_MIN)}</span></div>", unsafe_allow_html=True)
     st.markdown(f"<div style='font-size:0.78rem;color:#64748b;margin-top:8px;'>Last refresh<br><span style='color:#f0f4ff;font-family:Space Mono;'>{datetime.now().strftime('%H:%M:%S')}</span></div>", unsafe_allow_html=True)
 
     if st.button("🔄 Refresh Gates"):
@@ -558,7 +541,7 @@ if "Dashboard" in page:
         <div class='ticker-box'>
             <div class='ticker-label'>⚠ Estimated Financial Penalty Across All Gates Today</div>
             <div class='ticker-value'>{fmt_inr(total_penalty * 8)}</div>
-            <div style='color:#ef444488;font-size:0.75rem;margin-top:4px;'>Based on projected delays × $65/min (₹5,400) across 8 cycles · Source: Problem Statement</div>
+            <div style='color:#ef444488;font-size:0.75rem;margin-top:4px;'>Based on projected delays × $65/min (₹5,400) across 8 cycles · Per problem statement</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1087,7 +1070,7 @@ elif "Historical" in page:
     with sim2: baggage_late  = st.slider("Baggage delay (min)",  0, 30, 0)
     with sim3: fuel_late     = st.slider("Fuel delay (min)",     0, 30, 0)
 
-    base_tat = 60;  cascade_factor = 4.0  # From problem statement: "5-min catering delay → 20-min departure delay"
+    base_tat = 60;  cascade_factor = 4.0  # Problem statement: 5-min → 20-min (4×)
     total_op_delay         = catering_late + baggage_late + fuel_late
     actual_departure_delay = total_op_delay * cascade_factor
     total_cost             = actual_departure_delay * COST_PER_MIN
@@ -1239,7 +1222,7 @@ elif "Assistant" in page:
             chain_delay = worst_gate["delay_min"] * 4.0
             resp = (f"⚡ Cascade scenario for {worst_gate['gate']}: If turnaround is missed by "
                     f"**{worst_gate['delay_min']:.0f} minutes**, the departure delay cascades to "
-                    f"**{chain_delay:.0f} minutes** (×4× cascade from problem statement). "
+                    f"**{chain_delay:.0f} minutes** (×4 cascade, per problem statement). "
                     f"Total exposure: **{fmt_inr(chain_delay * COST_PER_MIN)}**.")
         elif any(w in q for w in ["reduce", "improve", "fix", "solve", "how"]):
             resp = ("💡 Top 3 recommendations to reduce delays:\n\n"
@@ -1468,7 +1451,7 @@ elif "Propagation" in page:
         <div class='info-box-body'>
             A delayed aircraft doesn't just affect one flight. The same plane is scheduled for the next leg,
             the crew hits duty-time limits, passengers miss connections, and gates get blocked for the next arrival.
-            <strong style='color:#f87171;'>Industry data shows a 1-minute ground delay creates 4 minutes of network delay.</strong>
+            <strong style='color:#f87171;'>Industry data shows a 1-minute ground delay creates 4 minutes of network delay (per problem statement: 5-min → 20-min).</strong>
             IndiGround prevents this by predicting delays BEFORE they happen.
         </div>
     </div>
@@ -1485,7 +1468,7 @@ elif "Propagation" in page:
         avg_pax = st.slider("Avg Passengers per Flight", 100, 220, 170)
 
     # ── Propagation Calculation ──
-    CASCADE = 4.0  # Problem statement: 5-min delay → 20-min cascade (4×)
+    CASCADE = 4.0  # Problem statement: 5-min → 20-min (4×)
     RECOVERY_PER_LEG = 0.15  # Each leg recovers 15% of delay (slack in schedule)
 
     leg_delays = []
@@ -1594,5 +1577,449 @@ elif "Propagation" in page:
                 IndiGround can prevent up to 60% of this cascade — saving
                 <strong style='color:#4ade80;font-family:Space Mono;'>{fmt_inr(prevented_cost)}</strong> per event.
             </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DAY 2 — CRISIS MODE: FUEL CONTAMINATION & DIVERTED SURGE
+# ══════════════════════════════════════════════════════════════════════════════
+elif "Crisis" in page:
+    st.markdown("# 🚨 Day 2: Crisis Mode")
+    st.markdown("<div style='color:#f87171;margin-top:-12px;margin-bottom:24px;font-weight:600;'>Fuel Contamination & Weather Diversion — Real-time Crisis Management</div>", unsafe_allow_html=True)
+
+    # ── Crisis Overview ──
+    st.markdown("""
+    <div class='ticker-box' style='animation:none;'>
+        <div class='ticker-label'>⚠️ ACTIVE CRISIS — FUEL CONTAMINATION + WEATHER DIVERSION</div>
+        <div style='color:#fca5a5;font-size:0.92rem;line-height:1.8;margin-top:10px;text-align:left;'>
+            <strong style='color:#f87171;'>1. Fuel Gridlock:</strong> Water contamination in hydrant system. Underground fuelling <strong>SUSPENDED</strong>. Only <strong style='color:#fbbf24;'>4 manual bowsers</strong> available at <strong>500 L/min</strong> (3× slower).<br>
+            <strong style='color:#f87171;'>2. Weather Surge:</strong> Thunderstorm diverted <strong style='color:#fbbf24;'>5 heavy B777 international flights</strong> with empty tanks and 300–437 pax each.<br>
+            <strong style='color:#f87171;'>3. Tiered Penalty:</strong> Diverted international = <strong style='color:#fbbf24;'>₹15,000/min</strong> &nbsp;|&nbsp; Domestic = ₹5,400/min
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Load Data ──
+    import os as _os
+    _BASE = _os.path.dirname(_os.path.abspath(__file__))
+    try:
+        df_diverted = pd.read_csv(_os.path.join(_BASE, "day2_diverted_flights.csv"))
+    except:
+        df_diverted = pd.DataFrame({
+            'Flight_ID': ['INT-1015-000','INT-1015-001','INT-1015-002','INT-1015-003','INT-1015-004'],
+            'Airline': ['Lufthansa','Emirates','British Airways','Air France','Singapore Air'],
+            'Arrival_Time': ['2024-10-15 14:39:00','2024-10-15 13:50:00','2024-10-15 11:41:00','2024-10-15 11:15:00','2024-10-15 11:39:00'],
+            'Aircraft_Type': ['B777']*5, 'Bags_Count': [412,410,342,309,437],
+            'Meals_Qty': [327,305,261,280,329], 'Status': ['DIVERTED']*5, 'Penalty_Rate_Per_Min': [15000]*5
+        })
+    try:
+        df_fuel_d1 = pd.read_csv(_os.path.join(_BASE, "fuel_operations.csv"))
+    except:
+        df_fuel_d1 = None
+
+    PUMP_RATE = 500          # L/min (manual bowser, per problem statement)
+    NUM_TRUCKS = 4           # per problem statement
+
+    # ── B777 Fuel: NOT in the CSV, so we make it adjustable ──
+    st.markdown("""
+    <div class='info-box' style='border-color:rgba(251,191,36,0.4);margin-bottom:16px;'>
+        <div class='info-box-title' style='color:#fbbf24;'>⚠️ Note on B777 Fuel Volume</div>
+        <div class='info-box-body'>The <code>day2_diverted_flights.csv</code> does <strong>not</strong> include a Fuel_Liters column.
+        The problem states these are "heavy long-haul flights with empty fuel tanks."
+        B777 max capacity ranges from 117,000L (B777-200) to 181,000L (B777-300ER).
+        Use the slider below to model different refuel scenarios. The cost simulation updates in real time.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    B777_FUEL_EST = st.slider("⛽ Estimated B777 Refuel Volume (Liters)", 50_000, 150_000, 90_000, 5_000, key="b777_fuel")
+
+    # ── KPI Strip ──
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("🚛 Bowsers Available", f"{NUM_TRUCKS}")
+    k2.metric("✈️ Diverted B777s", f"{len(df_diverted)}")
+    k3.metric("⛽ Pump Rate", f"{PUMP_RATE} L/min")
+    k4.metric("🕐 B777 Fuel Time", f"{B777_FUEL_EST // PUMP_RATE} min")
+
+    # ── Diverted Flights Cards with Escalate Priority ──
+    st.markdown("<div class='section-header'>Diverted International Flights</div>", unsafe_allow_html=True)
+    df_diverted['Manual_Fuel_Min'] = B777_FUEL_EST / PUMP_RATE
+    df_diverted['Min_Cost'] = df_diverted['Manual_Fuel_Min'] * df_diverted['Penalty_Rate_Per_Min']
+
+    for idx, row in df_diverted.iterrows():
+        fuel_time_min = int(B777_FUEL_EST / PUMP_RATE)
+        min_cost = fuel_time_min * row['Penalty_Rate_Per_Min']
+        bags = row['Bags_Count']
+        meals = row['Meals_Qty']
+
+        st.markdown(f"""
+        <div class='gate-card gate-red' style='animation:none;'>
+            <div style='display:flex;justify-content:space-between;align-items:flex-start;'>
+                <div>
+                    <div class='gate-title'>{row['Flight_ID']}  ·  {row['Airline']}</div>
+                    <div class='gate-sub'>{row['Aircraft_Type']} · {row['Status']} · Arr: {str(row['Arrival_Time'])[11:16]}</div>
+                </div>
+                <span class='badge badge-red'>₹15,000/min</span>
+            </div>
+            <div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-top:6px;'>
+                <div class='gate-stat'>🧳 Bags: <span>{bags}</span></div>
+                <div class='gate-stat'>🍽️ Meals: <span>{meals}</span></div>
+                <div class='gate-stat'>⛽ Fuel: <span>{B777_FUEL_EST:,}L</span></div>
+                <div class='gate-stat'>⏱️ Time: <span style='color:#f87171;'>{fuel_time_min}m</span></div>
+            </div>
+            <div style='margin-top:8px;font-size:0.82rem;color:#fca5a5;'>
+                Min penalty (fuel only): <strong style='font-family:Space Mono;'>{fmt_inr(min_cost)}</strong>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── Escalate Priority: per-flight optimization ──
+        with st.expander(f"🚀 Escalate Priority — {row['Flight_ID']} ({row['Airline']})", expanded=False):
+            # Determine optimal actions based on this flight's profile
+            bag_crew_needed = max(2, bags // 100)
+            meal_crew_needed = max(1, meals // 100)
+            partial_50_time = int(B777_FUEL_EST * 0.5 / PUMP_RATE)
+            partial_50_cost = partial_50_time * 15000
+            full_cost = fuel_time_min * 15000
+            savings_partial = full_cost - partial_50_cost
+
+            # Baggage: heavy = needs parallel unload teams
+            if bags > 350:
+                bag_urgency = "🔴 CRITICAL"
+                bag_action = f"Deploy {bag_crew_needed} parallel unload teams immediately. {bags} bags at B777 scale requires belt loaders on both cargo doors simultaneously."
+                bag_time_est = f"{bags * 0.08:.0f} min with {bag_crew_needed} teams"
+            else:
+                bag_urgency = "🟡 HIGH"
+                bag_action = f"Deploy {bag_crew_needed} unload teams. {bags} bags manageable with standard dual-door unload."
+                bag_time_est = f"{bags * 0.10:.0f} min with {bag_crew_needed} teams"
+
+            # Catering: international = more complex meal service
+            if meals > 300:
+                cat_urgency = "🔴 CRITICAL"
+                cat_action = f"Pre-stage {meals} meals at gate BEFORE aircraft arrives. International config requires galley-by-galley loading — start from rear."
+                cat_time_est = f"{meals * 0.08:.0f} min with pre-staging"
+            else:
+                cat_urgency = "🟡 HIGH"
+                cat_action = f"Pre-stage {meals} meals. Standard international loading sequence."
+                cat_time_est = f"{meals * 0.10:.0f} min"
+
+            # Fuel: THE bottleneck — provide specific truck recommendation
+            fuel_urgency = "🔴 CRITICAL — PRIMARY BOTTLENECK"
+            if fuel_time_min > 120:
+                fuel_action = (f"Assign dedicated bowser immediately on arrival. {B777_FUEL_EST:,}L at 500 L/min = "
+                              f"{fuel_time_min} min. Consider partial fuel to {B777_FUEL_EST*50//100:,}L "
+                              f"({partial_50_time} min, saves {fmt_inr(savings_partial)}) — aircraft can refuel at destination.")
+            else:
+                fuel_action = f"Assign dedicated bowser. {B777_FUEL_EST:,}L at 500 L/min = {fuel_time_min} min."
+
+            # Calculate total parallel time (bottleneck determines TAT)
+            bag_est_num = bags * 0.08 if bags > 350 else bags * 0.10
+            cat_est_num = meals * 0.08 if meals > 300 else meals * 0.10
+            parallel_tat = max(fuel_time_min, bag_est_num, cat_est_num)
+            bottleneck_dept = "⛽ Fuel" if fuel_time_min >= max(bag_est_num, cat_est_num) else ("🧳 Baggage" if bag_est_num > cat_est_num else "🍽️ Catering")
+
+            st.markdown(f"""
+            <div style='background:linear-gradient(135deg,#111827,#1a2438);border:1px solid #1e2d45;border-radius:10px;padding:16px;margin-bottom:8px;'>
+                <div style='font-family:Space Mono;font-size:0.82rem;color:#38bdf8;margin-bottom:12px;'>
+                    OPTIMAL RESPONSE PLAN — {row['Flight_ID']}
+                </div>
+                <div style='display:grid;grid-template-columns:1fr;gap:10px;'>
+                    <div style='border-left:3px solid #f59e0b;padding-left:12px;'>
+                        <div style='color:#f59e0b;font-size:0.78rem;font-weight:600;'>{fuel_urgency}</div>
+                        <div style='color:#e2e8f0;font-size:0.85rem;margin-top:4px;'>{fuel_action}</div>
+                        <div style='color:#64748b;font-size:0.78rem;margin-top:2px;'>Est. time: {fuel_time_min} min (full) / {partial_50_time} min (50%)</div>
+                    </div>
+                    <div style='border-left:3px solid #6366f1;padding-left:12px;'>
+                        <div style='color:#6366f1;font-size:0.78rem;font-weight:600;'>{bag_urgency} — BAGGAGE</div>
+                        <div style='color:#e2e8f0;font-size:0.85rem;margin-top:4px;'>{bag_action}</div>
+                        <div style='color:#64748b;font-size:0.78rem;margin-top:2px;'>Est. time: {bag_time_est}</div>
+                    </div>
+                    <div style='border-left:3px solid #0ea5e9;padding-left:12px;'>
+                        <div style='color:#0ea5e9;font-size:0.78rem;font-weight:600;'>{cat_urgency} — CATERING</div>
+                        <div style='color:#e2e8f0;font-size:0.85rem;margin-top:4px;'>{cat_action}</div>
+                        <div style='color:#64748b;font-size:0.78rem;margin-top:2px;'>Est. time: {cat_time_est}</div>
+                    </div>
+                </div>
+                <div style='margin-top:14px;padding:10px;background:rgba(17,24,39,0.6);border-radius:8px;border:1px solid #1e2d45;'>
+                    <div style='color:#94a3b8;font-size:0.78rem;'>
+                        <strong style='color:#f0f4ff;'>Bottleneck:</strong> {bottleneck_dept} &nbsp;|&nbsp;
+                        <strong style='color:#f0f4ff;'>Parallel TAT:</strong> {parallel_tat:.0f} min &nbsp;|&nbsp;
+                        <strong style='color:#f0f4ff;'>Full Fuel Cost:</strong> {fmt_inr(full_cost)} &nbsp;|&nbsp;
+                        <strong style='color:#f0f4ff;'>50% Fuel Saves:</strong> <span style='color:#4ade80;'>{fmt_inr(savings_partial)}</span>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ── Normal vs Crisis Comparison ──
+    st.markdown("<div class='section-header'>⚡ Normal Operations vs Crisis Impact</div>", unsafe_allow_html=True)
+    dom_avg_fuel = df_fuel_d1['Fuel_Liters'].mean() if df_fuel_d1 is not None else 9973
+    dom_fuel_time = dom_avg_fuel / PUMP_RATE
+    comp = pd.DataFrame({
+        'Metric': ['Fuel Volume', 'Manual Fuel Time', 'Penalty Rate', 'Cost Per Flight', 'Bags', 'Meals'],
+        'Domestic (avg)': [f'{dom_avg_fuel:,.0f} L', f'{dom_fuel_time:.0f} min', '₹5,400/min',
+                          fmt_inr(dom_fuel_time * 5400), '50–250', '100–200'],
+        'Diverted B777': [f'{B777_FUEL_EST:,} L', f'{B777_FUEL_EST // PUMP_RATE} min', '₹15,000/min',
+                         fmt_inr(B777_FUEL_EST / PUMP_RATE * 15000), '309–437', '261–329'],
+        'Crisis Multiplier': [f'{B777_FUEL_EST / dom_avg_fuel:.0f}×', f'{(B777_FUEL_EST / PUMP_RATE) / dom_fuel_time:.0f}×',
+                             '2.8×', f'{(B777_FUEL_EST / PUMP_RATE * 15000) / (dom_fuel_time * 5400):.0f}×', '~2×', '~2×']
+    })
+    st.dataframe(comp.set_index('Metric'), use_container_width=True)
+
+    # ── Fuel Truck Queue Simulation ──
+    st.markdown("<div class='section-header'>🚛 Fuel Truck Queue Scheduler (WSPT Algorithm)</div>", unsafe_allow_html=True)
+    st.markdown("<div style='color:#64748b;font-size:0.82rem;margin-bottom:12px;'>Weighted Shortest Processing Time: prioritizes flights with highest penalty-to-fuel-time ratio to minimize total cost</div>", unsafe_allow_html=True)
+
+    from datetime import datetime as _dt, timedelta as _td
+    sim_base = _dt(2024, 10, 15)
+
+    # Build domestic flights in the time window
+    domestic_sim = []
+    if df_fuel_d1 is not None:
+        def _pt2(v):
+            v = str(v).strip()
+            for f in ('%H:%M:%S','%I:%M %p','%I:%M:%S %p','%H:%M'):
+                try: return pd.to_datetime(v, format=f)
+                except: continue
+            return pd.NaT
+        df_fuel_d1['_hr'] = df_fuel_d1['Arrival_Time'].apply(_pt2).dt.hour
+        win = df_fuel_d1[(df_fuel_d1['_hr'] >= 11) & (df_fuel_d1['_hr'] <= 15)].head(8)
+        for _, r in win.iterrows():
+            t = _pt2(r['Arrival_Time'])
+            if pd.isna(t): continue
+            domestic_sim.append({
+                'id': r['Flight_ID'], 'airline': r['Airline'], 'type': 'DOMESTIC',
+                'arrival': sim_base.replace(hour=t.hour, minute=t.minute),
+                'fuel_L': r['Fuel_Liters'], 'fuel_min': r['Fuel_Liters'] / PUMP_RATE,
+                'rate': 5400, 'bags': 150, 'meals': 140
+            })
+
+    diverted_sim = []
+    for _, r in df_diverted.iterrows():
+        arr = pd.to_datetime(r['Arrival_Time'])
+        diverted_sim.append({
+            'id': r['Flight_ID'], 'airline': r['Airline'], 'type': 'DIVERTED',
+            'arrival': _dt(2024, 10, 15, arr.hour, arr.minute),
+            'fuel_L': B777_FUEL_EST, 'fuel_min': B777_FUEL_EST / PUMP_RATE,
+            'rate': 15000, 'bags': r['Bags_Count'], 'meals': r['Meals_Qty']
+        })
+
+    all_sim = sorted(domestic_sim + diverted_sim, key=lambda x: x['arrival'])
+
+    # ── Simulate queue ──
+    def run_sim(flights, n_trucks):
+        trks = [sim_base.replace(hour=11, minute=0)] * n_trucks
+        pend = list(flights)
+        sched = []
+        while pend:
+            ti = trks.index(min(trks))
+            tf = trks[ti]
+            av = [f for f in pend if f['arrival'] <= tf]
+            if not av:
+                na = min(f['arrival'] for f in pend)
+                trks[ti] = na
+                av = [f for f in pend if f['arrival'] <= na]
+            ch = max(av, key=lambda x: x['rate'] / max(x['fuel_min'], 1))
+            st_time = max(tf, ch['arrival'])
+            en_time = st_time + _td(minutes=ch['fuel_min'])
+            wait = (st_time - ch['arrival']).total_seconds() / 60
+            tot_d = (en_time - ch['arrival']).total_seconds() / 60
+            sched.append({**ch, 'truck': ti + 1, 'start': st_time, 'end': en_time,
+                         'wait': wait, 'total_delay': tot_d, 'cost': tot_d * ch['rate']})
+            trks[ti] = en_time
+            pend.remove(ch)
+        return sched
+
+    schedule = run_sim(all_sim, NUM_TRUCKS)
+
+    # ── Gantt Chart ──
+    fig_gantt = go.Figure()
+    for s in schedule:
+        x_start = (s['start'] - sim_base.replace(hour=11, minute=0)).total_seconds() / 60
+        fig_gantt.add_trace(go.Bar(
+            y=[f"Truck {s['truck']}"], x=[s['fuel_min']], base=[x_start],
+            orientation='h', showlegend=False,
+            marker_color='#ef4444' if s['type'] == 'DIVERTED' else '#0ea5e9',
+            marker_opacity=0.85,
+            text=f"{s['id'][:12]}", textposition='inside',
+            textfont=dict(color='white', size=9),
+            hovertext=f"{s['id']} ({s['airline']})<br>Fuel: {s['fuel_min']:.0f}m | Wait: {s['wait']:.0f}m<br>Cost: {fmt_inr(s['cost'])}"
+        ))
+    fig_gantt.add_trace(go.Bar(y=[None], x=[None], marker_color='#ef4444', name='Diverted (₹15k/min)', showlegend=True))
+    fig_gantt.add_trace(go.Bar(y=[None], x=[None], marker_color='#0ea5e9', name='Domestic (₹5.4k/min)', showlegend=True))
+    fig_gantt.update_layout(
+        barmode='overlay', paper_bgcolor='#0a0e1a', plot_bgcolor='#111827',
+        font=dict(color='#94a3b8'), xaxis=dict(gridcolor='#1e2d45', title='Minutes from 11:00 AM', dtick=60),
+        yaxis=dict(gridcolor='#1e2d45', autorange='reversed'),
+        legend=dict(bgcolor='#111827', bordercolor='#1e2d45', orientation='h', y=1.15),
+        margin=dict(t=30, b=40, l=10), height=230
+    )
+    st.plotly_chart(fig_gantt, use_container_width=True)
+
+    # ── Schedule Table ──
+    sched_df = pd.DataFrame([{
+        'Flight': s['id'], 'Type': s['type'], 'Airline': s['airline'],
+        'Truck': f"T{s['truck']}", 'Arrival': s['arrival'].strftime('%H:%M'),
+        'Fuel Start': s['start'].strftime('%H:%M'), 'Fuel End': s['end'].strftime('%H:%M'),
+        'Queue Wait': f"{s['wait']:.0f} min", 'Fuel Time': f"{s['fuel_min']:.0f} min",
+        'Rate': fmt_inr(s['rate']) + '/min', 'Total Cost': fmt_inr(s['cost'])
+    } for s in schedule])
+    st.dataframe(sched_df.set_index('Flight'), use_container_width=True)
+
+    total_crisis = sum(s['cost'] for s in schedule)
+    div_cost = sum(s['cost'] for s in schedule if s['type'] == 'DIVERTED')
+    dom_cost = sum(s['cost'] for s in schedule if s['type'] == 'DOMESTIC')
+
+    st.markdown(f"""
+    <div class='ticker-box'>
+        <div class='ticker-label'>💰 Total Crisis Penalty</div>
+        <div class='ticker-value'>{fmt_inr(total_crisis)}</div>
+        <div style='color:#ef444488;font-size:0.82rem;margin-top:6px;'>
+            Diverted: {fmt_inr(div_cost)} ({div_cost/max(total_crisis,1)*100:.0f}%) &nbsp;|&nbsp;
+            Domestic: {fmt_inr(dom_cost)} ({dom_cost/max(total_crisis,1)*100:.0f}%)
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Cost Breakdown by Department ──
+    st.markdown("<div class='section-header'>📊 Cost Breakdown by Department</div>", unsafe_allow_html=True)
+    st.markdown("<div style='color:#64748b;font-size:0.82rem;margin-bottom:12px;'>The hint: <em>\"the main thing to find is the cost and cost optimization among the three departments\"</em></div>", unsafe_allow_html=True)
+
+    fuel_cost = total_crisis  # Fuel is the measured bottleneck from simulation
+    # Baggage: B777 has 309-437 bags (2× domestic). Estimated baggage processing time
+    # creates overlap delays. Each minute of overlap = penalty rate.
+    bag_overlap_div = sum(max(0, s['bags'] - 200) * 0.12 for s in schedule if s['type'] == 'DIVERTED')
+    bag_overlap_dom = sum(max(0, s.get('bags', 150) - 100) * 0.08 for s in schedule if s['type'] == 'DOMESTIC')
+    baggage_cost = (bag_overlap_div * 15000 + bag_overlap_dom * 5400) * 0.15
+
+    cat_overlap_div = sum(max(0, s['meals'] - 150) * 0.10 for s in schedule if s['type'] == 'DIVERTED')
+    cat_overlap_dom = sum(max(0, s.get('meals', 140) - 100) * 0.07 for s in schedule if s['type'] == 'DOMESTIC')
+    catering_cost = (cat_overlap_div * 15000 + cat_overlap_dom * 5400) * 0.10
+
+    dept_names = ['⛽ Fuel', '🧳 Baggage', '🍽️ Catering']
+    dept_vals = [fuel_cost, baggage_cost, catering_cost]
+    dept_cols = ['#f59e0b', '#6366f1', '#0ea5e9']
+    total_dept = sum(dept_vals)
+
+    c_dept1, c_dept2 = st.columns([2, 1])
+    with c_dept1:
+        fig_dept = go.Figure(go.Bar(
+            x=dept_names, y=dept_vals, marker_color=dept_cols, marker_opacity=0.88,
+            text=[f"{fmt_inr(v)}<br>({v/total_dept*100:.0f}%)" for v in dept_vals],
+            textposition='outside', textfont=dict(color='#f0f4ff', size=12, family='Space Mono')
+        ))
+        fig_dept.update_layout(
+            paper_bgcolor='#0a0e1a', plot_bgcolor='#111827', font=dict(color='#94a3b8'),
+            yaxis=dict(gridcolor='#1e2d45', title='Penalty Cost (₹)'), xaxis=dict(gridcolor='#1e2d45'),
+            margin=dict(t=30, b=10), height=350
+        )
+        st.plotly_chart(fig_dept, use_container_width=True)
+    with c_dept2:
+        fig_pie = go.Figure(go.Pie(
+            labels=dept_names, values=dept_vals, marker=dict(colors=dept_cols),
+            hole=0.55, textinfo='percent+label', textfont=dict(color='#f0f4ff', size=11)
+        ))
+        fig_pie.update_layout(
+            paper_bgcolor='#0a0e1a', font=dict(color='#94a3b8'),
+            margin=dict(t=10, b=10, l=10, r=10), height=350,
+            annotations=[dict(text=f"<b>{fmt_inr(total_dept)}</b>", x=0.5, y=0.5,
+                             font=dict(size=14, color='#f0f4ff', family='Space Mono'), showarrow=False)]
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.markdown(f"""
+    <div class='rec-box'>
+        <div class='rec-title'>🔑 Key Finding: Fuel = {fuel_cost/total_dept*100:.0f}% of Total Crisis Cost</div>
+        <div class='rec-body'>
+            <strong style='color:#f59e0b'>Fuel operations</strong> dominates at
+            <strong style='color:#fca5a5;font-family:Space Mono;'>{fmt_inr(fuel_cost)}</strong>.
+            Baggage + Catering combined = only {(baggage_cost+catering_cost)/total_dept*100:.0f}%.
+            <strong style='color:#38bdf8;'>During a fuel crisis, every marginal resource ₹ should go to fuel.</strong>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Optimization: Truck Count ──
+    st.markdown("<div class='section-header'>🔧 Optimization A: Additional Bowsers</div>", unsafe_allow_html=True)
+
+    truck_costs = {}
+    for nt in [2, 3, 4, 5, 6]:
+        res = run_sim(all_sim, nt)
+        truck_costs[nt] = sum(s['cost'] for s in res)
+
+    fig_trk = go.Figure(go.Bar(
+        x=[f"{t} Trucks" for t in truck_costs], y=list(truck_costs.values()),
+        marker_color=['#ef4444' if t < 4 else '#f59e0b' if t == 4 else '#22c55e' for t in truck_costs],
+        text=[fmt_inr(v) for v in truck_costs.values()], textposition='outside',
+        textfont=dict(color='#f0f4ff', size=11, family='Space Mono')
+    ))
+    fig_trk.update_layout(
+        paper_bgcolor='#0a0e1a', plot_bgcolor='#111827', font=dict(color='#94a3b8'),
+        yaxis=dict(gridcolor='#1e2d45', title='Total Cost'), xaxis=dict(gridcolor='#1e2d45'),
+        margin=dict(t=30, b=10), height=300
+    )
+    st.plotly_chart(fig_trk, use_container_width=True)
+
+    save_5 = truck_costs[4] - truck_costs[5]
+    st.markdown(f"""
+    <div class='rec-box' style='border-color:rgba(34,197,94,0.3);background:linear-gradient(135deg,#071a0e,#0a1f10);'>
+        <div class='rec-title' style='color:#22c55e;'>💡 5th Bowser = {fmt_inr(save_5)} Saved</div>
+        <div class='rec-body'>Renting at ₹50,000/hr for 6 hours = ₹3,00,000. ROI: <strong style='color:#4ade80;'>{save_5/300000:.0f}×</strong> return.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Optimization: Partial Fueling ──
+    st.markdown("<div class='section-header'>🔧 Optimization B: Partial Fueling Strategy</div>", unsafe_allow_html=True)
+    st.markdown("<div style='color:#64748b;font-size:0.82rem;margin-bottom:12px;'>Fuel B777s to minimum safe level → depart faster → free trucks for domestic flights</div>", unsafe_allow_html=True)
+
+    fuel_pct = st.slider("Fuel diverted B777s to what % of full capacity?", 25, 100, 100, 5, key="d2_fuel_pct")
+    part_fuel = int(B777_FUEL_EST * fuel_pct / 100)
+    part_time = part_fuel / PUMP_RATE
+    part_cost_ea = part_time * 15000
+    part_total = part_cost_ea * 5
+    full_total = (B777_FUEL_EST / PUMP_RATE) * 15000 * 5
+    part_saving = full_total - part_total
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Fuel Per B777", f"{part_fuel:,} L")
+    p2.metric("Fuel Time Each", f"{part_time:.0f} min")
+    p3.metric("5-Flight Cost", fmt_inr(part_total))
+    p4.metric("Saving vs Full", fmt_inr(part_saving), delta=f"-{part_saving/full_total*100:.0f}%")
+
+    if fuel_pct < 100:
+        st.markdown(f"""
+        <div class='rec-box' style='border-color:rgba(34,197,94,0.3);background:linear-gradient(135deg,#071a0e,#0a1f10);'>
+            <div class='rec-title' style='color:#22c55e;'>💡 {fuel_pct}% Fueling saves {fmt_inr(part_saving)}</div>
+            <div class='rec-body'>B777s depart in <strong>{part_time:.0f} min</strong> instead of 180 min.
+            Refuel at destination hub. Frees trucks {(1 - fuel_pct/100)*100:.0f}% faster for queued domestic flights.</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── Summary Recommendations ──
+    st.markdown("<div class='section-header'>📋 Crisis Response Priority Matrix</div>", unsafe_allow_html=True)
+
+    recs = [
+        ("🔴 IMMEDIATE", "#ef4444",
+         f"Redirect ALL available ground crew to fuel operations. Fuel = {fuel_cost/total_dept*100:.0f}% of crisis cost. "
+         "Baggage/catering can run skeleton crews — their cost contribution is marginal."),
+        ("🟡 SHORT-TERM", "#f59e0b",
+         f"Procure 5th bowser (rent if needed). Saves {fmt_inr(save_5)} per crisis. "
+         f"Even at ₹3L rental cost, ROI = {save_5/300000:.0f}×."),
+        ("🔵 TACTICAL", "#38bdf8",
+         "Implement partial fueling for diverted B777s — fuel to minimum safe level, "
+         "dispatch to destination for full refuel. Frees truck capacity 40–60% faster."),
+        ("🟣 OPERATIONAL", "#a78bfa",
+         "WSPT scheduling: process short domestic flights between B777 refuels. "
+         "A 12-min domestic costs ₹64k vs leaving truck idle. Maximize truck utilization."),
+        ("🟢 STRATEGIC", "#22c55e",
+         "Post-crisis: negotiate standby bowser contracts. Annual standby cost ~₹50L "
+         f"vs {fmt_inr(total_crisis)} per crisis event. Build fuel resilience into SOP.")
+    ]
+
+    for title, color, text in recs:
+        st.markdown(f"""
+        <div class='rec-box' style='border-left:4px solid {color};margin-bottom:8px;'>
+            <div style='font-family:Space Mono;font-size:0.75rem;color:{color};letter-spacing:0.08em;margin-bottom:6px;'>{title}</div>
+            <div style='color:#e2e8f0;font-size:0.88rem;line-height:1.6;'>{text}</div>
         </div>
         """, unsafe_allow_html=True)
